@@ -33,6 +33,13 @@ class TableBounds:
     y2: int
     ball_radius: int = 13
 
+    def __post_init__(self) -> None:
+        if self.x2 <= self.x1 or self.y2 <= self.y1:
+            raise ValueError(
+                f"TableBounds degenerate: ({self.x1},{self.y1})→({self.x2},{self.y2})"
+            )
+        self.ball_radius = max(5, min(40, self.ball_radius))
+
     # ── convenience ───────────────────────────────────────────────────────────
 
     def as_tuple(self) -> tuple[int, int, int, int]:

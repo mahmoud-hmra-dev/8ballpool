@@ -34,3 +34,18 @@ BOUNCE_STEPS = 5      # max wall bounces to trace for the cue-ball path
 
 # ── Table detection ───────────────────────────────────────────────────────────
 SKIP_TOP_FRAC = 0.27  # fraction of frame height to skip (score/UI panel at top)
+
+# ── Ball classification ────────────────────────────────────────────────────────
+CUE_WHITENESS_THRESH   = 0.22   # whiteness_score() threshold to identify the cue ball
+CUE_WHITE_FRAC         = 0.35   # fraction of high-V/low-S pixels → classify as cue
+EIGHT_BALL_DARK_FRAC   = 0.55   # fraction of dark pixels → classify as 8-ball
+STRIPE_MID_Y0          = 0.33   # stripe middle-band top boundary (fraction of patch height)
+STRIPE_MID_Y1          = 0.67   # stripe middle-band bottom boundary
+STRIPE_MID_WHITE_MIN   = 0.22   # white fraction in middle band must exceed this → stripe
+STRIPE_TOTAL_WHITE_MAX = 0.42   # overall white fraction must stay below this → stripe (not cue)
+
+# ── Shot difficulty thresholds (used by renderer) ─────────────────────────────
+DIFF_EASY_MISS_PX    = 12   # miss ≤ this AND angle ≤ DIFF_EASY_ANGLE_DEG  → EASY
+DIFF_EASY_ANGLE_DEG  = 30
+DIFF_MED_MISS_PX     = 35   # miss ≤ this AND angle ≤ DIFF_MED_ANGLE_DEG   → MEDIUM
+DIFF_MED_ANGLE_DEG   = 55

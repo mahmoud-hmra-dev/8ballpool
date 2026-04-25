@@ -22,11 +22,14 @@ YOLO classes
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from typing import Optional
 
 import numpy as np
+
+log = logging.getLogger(__name__)
 
 try:
     import torch
@@ -58,11 +61,12 @@ class YOLOInference:
 
     def _load(self) -> None:
         if not os.path.exists(_ENGINE_PATH):
-            print(
-                "[Inference] TRT engine not found — using best.pt\n"
-                "  For 3-5× speedup, run once:\n"
-                f"  python -c \"from ultralytics import YOLO; "
-                f"YOLO(r'{_PT_PATH}').export(format='engine', half=True, device=0)\""
+            log.info(
+                "TRT engine not found — using best.pt\n"
+                "  For 3-5x speedup, run once:\n"
+                "  python -c \"from ultralytics import YOLO; "
+                "YOLO(r'%s').export(format='engine', half=True, device=0)\"",
+                _PT_PATH,
             )
         try:
             from ultralytics import YOLO
@@ -72,10 +76,10 @@ class YOLOInference:
                 verbose=False, device=_DEVICE, half=_HALF, imgsz=YOLO_IMGSZ,
             )
             tag = "TRT" if _YOLO_PATH.endswith(".engine") else "PT"
-            print(f"[Inference] YOLO ready [{tag}]  device={_DEVICE}  "
-                  f"half={_HALF}  imgsz={YOLO_IMGSZ}")
+            log.info("YOLO ready [%s]  device=%s  half=%s  imgsz=%d",
+                     tag, _DEVICE, _HALF, YOLO_IMGSZ)
         except Exception as e:
-            print(f"[Inference] Failed to load model: {e}")
+            log.error("Failed to load model: %s", e)
 
     @property
     def ready(self) -> bool:

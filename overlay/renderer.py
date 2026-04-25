@@ -21,6 +21,10 @@ import math
 import tkinter as tk
 from typing import Optional
 
+from config import (
+    DIFF_EASY_MISS_PX, DIFF_EASY_ANGLE_DEG,
+    DIFF_MED_MISS_PX, DIFF_MED_ANGLE_DEG,
+)
 from models import Shot, Vec2
 
 # Cue-ball bounce path: bright blue fading to dark as the ball travels further
@@ -29,14 +33,14 @@ _BOUNCE_COLS = ["#44AAFF", "#3399EE", "#2277CC", "#1155AA", "#003388"]
 
 def _difficulty_color(miss: float, angle: float) -> str:
     """Shot difficulty encoded as a color — used on every difficulty-colored element."""
-    if miss < 12 and angle < 30: return "#00FF88"   # easy   — green
-    if miss < 35 and angle < 55: return "#FFD700"   # medium — gold
-    return "#FF4444"                                  # hard   — red
+    if miss < DIFF_EASY_MISS_PX and angle < DIFF_EASY_ANGLE_DEG: return "#00FF88"
+    if miss < DIFF_MED_MISS_PX  and angle < DIFF_MED_ANGLE_DEG:  return "#FFD700"
+    return "#FF4444"
 
 
 def _difficulty_label(miss: float, angle: float) -> str:
-    if miss < 12 and angle < 30: return "EASY"
-    if miss < 35 and angle < 55: return "MEDIUM"
+    if miss < DIFF_EASY_MISS_PX and angle < DIFF_EASY_ANGLE_DEG: return "EASY"
+    if miss < DIFF_MED_MISS_PX  and angle < DIFF_MED_ANGLE_DEG:  return "MEDIUM"
     return "HARD"
 
 

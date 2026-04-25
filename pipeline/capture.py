@@ -10,6 +10,7 @@ composited output into our DC. Falls back to mss if PrintWindow fails.
 GDI objects (DC + bitmap) are created once and reused every frame,
 saving ~10 Win32 calls per frame compared to creating them fresh each time.
 """
+import logging
 import threading
 
 import cv2
@@ -20,6 +21,8 @@ import win32ui
 from ctypes import windll
 
 from config import BROWSER_TOP_OFFSET
+
+log = logging.getLogger(__name__)
 
 
 class ScreenCapture:
@@ -72,7 +75,7 @@ class ScreenCapture:
 
         found.sort(reverse=True)
         _, hwnd, rect = found[0]
-        print(f"[Capture] Window: '{win32gui.GetWindowText(hwnd)}'  rect={rect}")
+        log.info("Window: '%s'  rect=%s", win32gui.GetWindowText(hwnd), rect)
         return self._init_region(hwnd, rect)
 
     def _try_restore(self, minimized: list) -> tuple | None:
@@ -80,7 +83,7 @@ class ScreenCapture:
             return None
         minimized.sort(reverse=True)
         _, hwnd, title = minimized[0]
-        print(f"[Capture] Found minimized Chrome: '{title}' — restoring...")
+        log.info("Found minimized Chrome: '%s' — restoring...", title)
         try:
             win32gui.ShowWindow(hwnd, 9)   # SW_RESTORE = 9
             win32gui.SetForegroundWindow(hwnd)
@@ -88,7 +91,7 @@ class ScreenCapture:
             if not win32gui.IsIconic(hwnd) and rect[2] > rect[0] and rect[3] > rect[1]:
                 return self._init_region(hwnd, rect)
         except Exception as e:
-            print(f"[Capture] Could not restore window: {e}")
+            log.warning("Could not restore window: %s", e)
         return None
 
     def _init_region(self, hwnd: int, rect: tuple) -> tuple:
@@ -140,7 +143,7 @@ class ScreenCapture:
         try:
             ok = windll.user32.PrintWindow(self._hwnd, self._save_dc.GetSafeHdc(), 2)
             if not ok:
-                print("[Capture] PrintWindow returned 0 — falling back to mss")
+                log.warning("PrintWindow returned 0 — falling back to mss")
                 return self._mss_capture(r)
 
             raw  = self._bmp.GetBitmapBits(True)
@@ -153,7 +156,7 @@ class ScreenCapture:
             return cv2.cvtColor(full[cy1:cy2, cx1:cx2].copy(), cv2.COLOR_BGRA2BGR)
 
         except Exception as e:
-            print(f"[Capture] PrintWindow error: {e}")
+            log.error("PrintWindow error: %s", e)
             self._save_dc = None   # force re-init next frame
             return self._mss_capture(r)
 
@@ -167,7 +170,7 @@ class ScreenCapture:
                 {"left": x1, "top": y1, "width": x2 - x1, "height": y2 - y1})
             return cv2.cvtColor(np.array(raw), cv2.COLOR_BGRA2BGR)
         except Exception as e:
-            print(f"[Capture] mss error: {e}")
+            log.error("mss error: %s", e)
             self._local.sct = None
             return None
 
@@ -188,7 +191,7 @@ class ScreenCapture:
         t = threading.Thread(
             target=self._capture_loop, daemon=True, name="capture-worker")
         t.start()
-        print("[Capture] async capture thread started")
+        log.info("async capture thread started")
 
     def latest_frame(self) -> np.ndarray | None:
         """Return the most recently captured frame (may be None on first call)."""

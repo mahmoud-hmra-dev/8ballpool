@@ -26,15 +26,23 @@ except Exception:
     except Exception:
         pass
 
+import logging
 import sys
 import threading
 import time
 from typing import Optional
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
 import cv2
 import numpy as np
 
-from config import TABLE_RECALC, TARGET_FPS
+from config import TABLE_RECALC, TARGET_FPS, CUE_WHITENESS_THRESH
 from models import Shot, TableBounds
 from overlay.window import OverlayWindow
 from pipeline.capture import ScreenCapture
@@ -71,23 +79,21 @@ class ShotAssistant:
     def start(self) -> None:
         self._region = self._capture.find_game_window()
         if self._region is None:
-            print("\n[ERROR] Chrome window not found.\n"
-                  "  Open Chrome at 8ballpool.com/game\n")
+            log.error("Chrome window not found. Open Chrome at 8ballpool.com/game")
             sys.exit(1)
 
         x1, y1, x2, y2 = self._region
         w, h = x2 - x1, y2 - y1
         if w <= 0 or h <= 0:
-            print(f"\n[ERROR] Invalid window size {w}×{h}.\n"
-                  f"  Restore the Chrome window and try again.\n")
+            log.error("Invalid window size %dx%d. Restore the Chrome window and try again.", w, h)
             sys.exit(1)
 
         # Clamp origin to screen edge; offset corrects coordinate translation
         sx, sy = max(0, x1), max(0, y1)
         self._canvas_offset = (float(sx - x1), float(sy - y1))
 
-        print(f"[Main] Region={self._region}  ({w}×{h})")
-        print(f"[Main] Canvas origin=({sx},{sy})  offset={self._canvas_offset}")
+        log.info("Region=%s  (%dx%d)", self._region, w, h)
+        log.info("Canvas origin=(%d,%d)  offset=%s", sx, sy, self._canvas_offset)
 
         self._overlay = OverlayWindow(sx, sy, w, h)
         self._overlay.on_type_change = self._set_my_type
@@ -161,7 +167,7 @@ class ShotAssistant:
                 b["ws"] = whiteness_score(b["patch"], b["r"])
 
             cue_idx = max(range(len(raw_balls)), key=lambda i: raw_balls[i]["ws"])
-            has_cue = raw_balls[cue_idx]["ws"] > 0.22
+            has_cue = raw_balls[cue_idx]["ws"] > CUE_WHITENESS_THRESH
 
             for i, b in enumerate(raw_balls):
                 if i == cue_idx and has_cue:
@@ -232,18 +238,15 @@ class ShotAssistant:
         if detected:
             with self._table_lock:
                 self._table = detected
-            print(f"\n[Main] Table={detected.as_tuple()}  r={detected.ball_radius}")
+            log.info("Table=%s  r=%d", detected.as_tuple(), detected.ball_radius)
 
     def _log_fps(self, buf: list, t0: float, n_balls: int, has_shot: bool) -> None:
         buf.append(time.perf_counter() - t0)
         if len(buf) > TARGET_FPS:
             buf.pop(0)
             fps = len(buf) / sum(buf)
-            print(
-                f"[Main] FPS:{fps:5.1f}  balls:{n_balls:2d}  "
-                f"shot:{'yes' if has_shot else 'no '}",
-                end="\r",
-            )
+            print(f"FPS:{fps:5.1f}  balls:{n_balls:2d}  shot:{'yes' if has_shot else 'no '}",
+                  end="\r")
 
     def _save_debug(self, frame: np.ndarray, balls: list,
                     pockets: list, table: TableBounds) -> None:
@@ -266,7 +269,7 @@ class ShotAssistant:
                         (b["pos"][0], b["pos"][1] - b["radius"] - 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
         cv2.imwrite("debug_frame.png", dbg)
-        print(f"[Main] debug_frame.png saved — balls={len(balls)}  r={table.ball_radius}")
+        log.info("debug_frame.png saved — balls=%d  r=%d", len(balls), table.ball_radius)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

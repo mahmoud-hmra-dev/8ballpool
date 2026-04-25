@@ -19,6 +19,11 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from config import (
+    CUE_WHITENESS_THRESH, CUE_WHITE_FRAC, EIGHT_BALL_DARK_FRAC,
+    STRIPE_MID_Y0, STRIPE_MID_Y1, STRIPE_MID_WHITE_MIN, STRIPE_TOTAL_WHITE_MAX,
+)
+
 # HSV bounds for each color: ([H_lo, S_lo, V_lo], [H_hi, S_hi, V_hi])
 _COLOR_RANGES: dict[str, tuple[list[int], list[int]]] = {
     "yellow": ([15, 100, 100], [35,  255, 255]),
@@ -53,7 +58,7 @@ def whiteness_score(patch: np.ndarray, radius: int) -> float:
     v, s = center[:, :, 2], center[:, :, 1]
     n    = center.shape[0] * center.shape[1]
     white_frac = float(np.sum((v > 170) & (s < 70))) / max(n, 1)
-    brightness = float(np.mean(v)) / 255
+    brightness = float(np.mean(v)) / 255.0
     return white_frac * brightness
 
 
@@ -69,7 +74,7 @@ def is_stripe(patch: np.ndarray) -> bool:
         return False
     hsv    = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
     hh, ww = hsv.shape[:2]
-    y0, y1 = int(hh * 0.33), int(hh * 0.67)
+    y0, y1 = int(hh * STRIPE_MID_Y0), int(hh * STRIPE_MID_Y1)
     mid    = hsv[y0:y1, :]
     if mid.size == 0:
         return False
@@ -79,7 +84,7 @@ def is_stripe(patch: np.ndarray) -> bool:
 
     mid_white   = np.sum((mv > 165) & (ms < 75)) / max(len(mv), 1)
     total_white = np.sum((v  > 165) & (s  < 75)) / max(len(v),  1)
-    return mid_white > 0.22 and total_white < 0.42
+    return mid_white > STRIPE_MID_WHITE_MIN and total_white < STRIPE_TOTAL_WHITE_MAX
 
 
 def classify_color(patch: np.ndarray) -> str:
@@ -96,9 +101,9 @@ def classify_color(patch: np.ndarray) -> str:
     n   = len(h)
 
     # Special cases first (before color matching)
-    if np.sum((v > 170) & (s < 70)) / n > 0.35:
+    if np.sum((v > 170) & (s < 70)) / n > CUE_WHITE_FRAC:
         return "cue"
-    if np.sum((v < 65) & (s < 80)) / n > 0.55:
+    if np.sum((v < 65) & (s < 80)) / n > EIGHT_BALL_DARK_FRAC:
         return "8ball"
 
     # Need meaningful saturation to identify a color
