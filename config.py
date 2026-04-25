@@ -11,8 +11,9 @@ TABLE_RECALC       = 90    # frames between full table re-detections
 BROWSER_TOP_OFFSET = 90    # px to skip (Chrome title + tabs + address bar)
 
 # ── YOLO ──────────────────────────────────────────────────────────────────────
-BALL_CONF  = 0.30   # minimum confidence to accept a ball detection
-COLL_CONF  = 0.35   # minimum confidence to accept a collision (ghost ball) detection
+BALL_CONF   = 0.30   # minimum confidence to accept a ball detection
+COLL_CONF   = 0.35   # minimum confidence to accept a collision (ghost ball) detection
+YOLO_IMGSZ  = 640    # YOLO input resolution; reduce to 416 for more speed (less accuracy)
 
 # ── Ball tracking (Exponential Weighted Average) ──────────────────────────────
 # TRACK_ALPHA: how quickly a track follows a new detection.

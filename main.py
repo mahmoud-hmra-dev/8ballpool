@@ -3,15 +3,15 @@
 ================================
 Entry point. Wires the pipeline stages together and runs the main loop.
 
-Pipeline (one iteration per frame, ~60 FPS):
-  1. Capture     — grab Chrome window content via Win32 PrintWindow
-  2. Table       — detect felt bounds (cached every TABLE_RECALC frames)
-  3. Inference   — run YOLO on the table ROI
-  4. Classify    — label each ball (cue / 8ball / solid / stripe)
-  5. Track       — match detections to tracks, smooth with EWA
-  6. Ghost       — stabilise ghost-ball position across frames
-  7. Shot        — select best shot (AI path or physics fallback)
-  8. Render      — push shot to overlay for drawing
+Two concurrent loops
+--------------------
+  Fast loop  (~60 FPS) — capture → classify → track → shot → overlay
+  YOLO loop  (GPU rate) — runs AsyncYOLOInference in its own thread
+
+The fast loop never blocks on the GPU. It submits each frame to the async
+YOLO worker and immediately reads back the last completed result. There is a
+one-YOLO-cycle lag (~55 ms) in detections, but the EWA tracker absorbs it
+transparently — the overlay stays smooth at 60 FPS regardless of GPU speed.
 
 DPI awareness MUST be set before any other Windows API call — so it lives
 at the very top of this file, before any imports.
@@ -39,7 +39,7 @@ from models import Shot, TableBounds
 from overlay.window import OverlayWindow
 from pipeline.capture import ScreenCapture
 from pipeline.classifier import classify_ball, whiteness_score
-from pipeline.inference import YOLOInference
+from pipeline.inference import AsyncYOLOInference
 from pipeline.shot_engine import best_physics_shot, shot_from_ghost
 from pipeline.table_detector import TableDetector
 from pipeline.tracker import BallTracker, GhostBuffer
@@ -54,13 +54,14 @@ class ShotAssistant:
     def __init__(self):
         self._capture    = ScreenCapture()
         self._table_det  = TableDetector()
-        self._yolo       = YOLOInference()
+        self._yolo       = AsyncYOLOInference()   # GPU runs in its own thread
         self._tracker    = BallTracker()
         self._ghost_buf  = GhostBuffer()
         self._overlay:   Optional[OverlayWindow] = None
 
         self._table:          Optional[TableBounds] = None
         self._table_age:      int  = 0      # frames since last table re-detection
+        self._table_lock      = threading.Lock()
         self._region:         Optional[tuple] = None   # screen capture region
         self._canvas_offset:  tuple[float, float] = (0.0, 0.0)
         self._my_type:        Optional[str] = None     # "solid" | "stripe" | None
@@ -116,26 +117,34 @@ class ShotAssistant:
                 time.sleep(0.05)
                 continue
 
-            # ── 2. Table detection (cached; full re-detect every N frames) ────
+            # ── 2. Table detection (offloaded to background thread) ───────────
+            # Re-detect in the background every TABLE_RECALC frames so the
+            # fast loop is never stalled by table detection (~20 ms).
             self._table_age += 1
             if self._table is None or self._table_age >= TABLE_RECALC:
-                detected = self._table_det.detect(frame)
-                if detected:
-                    self._table     = detected
-                    self._table_age = 0
-                    print(f"\n[Main] Table={self._table.as_tuple()}  "
-                          f"r={self._table.ball_radius}")
+                self._table_age = 0
+                _frame_copy = frame.copy()
+                threading.Thread(
+                    target=self._detect_table_bg,
+                    args=(_frame_copy,), daemon=True,
+                ).start()
 
-            if self._table is None:
+            with self._table_lock:
+                table_snap = self._table
+
+            if table_snap is None:
                 time.sleep(0.05)
                 continue
 
-            pockets = self._table.pockets()
+            pockets = table_snap.pockets()
 
-            # ── 3. YOLO inference ─────────────────────────────────────────────
-            t = self._table
-            roi = frame[t.y1:t.y2, t.x1:t.x2]
-            raw_balls, raw_colls = self._yolo.run(roi, offset=(t.x1, t.y1))
+            # ── 3. YOLO inference (non-blocking) ─────────────────────────────
+            # submit() queues the frame for the GPU thread and returns instantly.
+            # latest_result() returns whatever the GPU finished last cycle.
+            # The 1-frame lag is invisible: EWA tracking smooths it out.
+            roi = frame[table_snap.y1:table_snap.y2, table_snap.x1:table_snap.x2]
+            self._yolo.submit(roi, offset=(table_snap.x1, table_snap.y1))
+            raw_balls, raw_colls = self._yolo.latest_result()
 
             if not raw_balls:
                 self._overlay.push_shot(None)
@@ -158,8 +167,8 @@ class ShotAssistant:
 
             # ── 5. Update ball-radius estimate (slow EWA — very stable) ───────
             measured = max(7, min(30, int(np.median([b["r"] for b in raw_balls]))))
-            R = self._table.ball_radius = int(
-                round(self._table.ball_radius * 0.85 + measured * 0.15))
+            R = table_snap.ball_radius = int(
+                round(table_snap.ball_radius * 0.85 + measured * 0.15))
 
             # ── 6. Track + smooth positions ───────────────────────────────────
             tracks = self._tracker.update(raw_balls)
@@ -188,14 +197,14 @@ class ShotAssistant:
             shot: Optional[Shot] = (
                 shot_from_ghost(
                     cue_pos, ghost_pos, self._ghost_buf.aim_conf,
-                    balls, pockets, self._table, R,
+                    balls, pockets, table_snap, R,
                 )
                 if ghost_pos else None
             )
             # PATH B: player is not aiming — suggest best physics shot
             if shot is None:
                 shot = best_physics_shot(
-                    cue_pos, balls, self._my_type, pockets, self._table, R)
+                    cue_pos, balls, self._my_type, pockets, table_snap, R)
 
             # ── 9. Translate frame coords → overlay canvas coords ─────────────
             if shot:
@@ -203,8 +212,8 @@ class ShotAssistant:
                 shot = shot.translate(dx, dy)
 
             # ── Debug frame saved once on startup ─────────────────────────────
-            if not debug_saved:
-                self._save_debug(frame, balls, pockets)
+            if not debug_saved and raw_balls:
+                self._save_debug(frame, balls, pockets, table_snap)
                 debug_saved = True
 
             self._overlay.push_shot(shot)
@@ -212,6 +221,14 @@ class ShotAssistant:
             time.sleep(max(0.0, interval - (time.perf_counter() - t0)))
 
     # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _detect_table_bg(self, frame: np.ndarray) -> None:
+        """Run table detection in a background thread and update self._table."""
+        detected = self._table_det.detect(frame)
+        if detected:
+            with self._table_lock:
+                self._table = detected
+            print(f"\n[Main] Table={detected.as_tuple()}  r={detected.ball_radius}")
 
     def _log_fps(self, buf: list, t0: float, n_balls: int, has_shot: bool) -> None:
         buf.append(time.perf_counter() - t0)
@@ -224,13 +241,14 @@ class ShotAssistant:
                 end="\r",
             )
 
-    def _save_debug(self, frame: np.ndarray, balls: list, pockets: list) -> None:
+    def _save_debug(self, frame: np.ndarray, balls: list,
+                    pockets: list, table: TableBounds) -> None:
         """Save an annotated frame to debug_frame.png once on startup."""
         dbg = frame.copy()
-        if self._table:
-            x1, y1, x2, y2 = self._table.as_tuple()
+        if table:
+            x1, y1, x2, y2 = table.as_tuple()
             cv2.rectangle(dbg, (x1, y1), (x2, y2), (0, 255, 0), 3)
-            cv2.putText(dbg, f"TABLE r={self._table.ball_radius}",
+            cv2.putText(dbg, f"TABLE r={table.ball_radius}",
                         (x1, max(0, y1 - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         for i, (px, py) in enumerate(pockets):
@@ -244,8 +262,7 @@ class ShotAssistant:
                         (b["pos"][0], b["pos"][1] - b["radius"] - 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
         cv2.imwrite("debug_frame.png", dbg)
-        print(f"[Main] debug_frame.png saved — "
-              f"balls={len(balls)}  r={self._table.ball_radius if self._table else '?'}")
+        print(f"[Main] debug_frame.png saved — balls={len(balls)}  r={table.ball_radius}")
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
