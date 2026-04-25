@@ -85,16 +85,34 @@ class ShotAssistant:
         self._auto_player:    Optional[AutoPlayer]    = None
         self._autoplay_state: str = "IDLE"   # IDLE | WAITING
         self._last_shot_time: float = 0.0
+        # guided mode
+        self._guided:            bool  = False
+        self._guided_state:      str   = "IDLE"   # IDLE | WAITING
+        self._fire_requested:    bool  = False
+        # self-play
+        self._selfplay:          bool  = False
+        self._pre_shot_record:   Optional[dict] = None
+        self._pre_shot_n_balls:  int   = 0
+        self._selfplay_success:  int   = 0
+        self._selfplay_total:    int   = 0
+        self._retrain_proc              = None   # subprocess
+        self._RETRAIN_EVERY:     int   = 20     # retrain after N successful shots
 
     # ── startup ───────────────────────────────────────────────────────────────
 
     def start(self, source: str = "auto", collect: bool = False,
-              autoplay: bool = False) -> None:
+              autoplay: bool = False, selfplay: bool = False,
+              guided: bool = False) -> None:
         source = _resolve_source(source)
         if collect:
             self._collector = DataCollector()
-        if autoplay:
+        if autoplay or selfplay or guided:
             self._predictor = ShotPredictor()
+        if selfplay:
+            self._selfplay = True
+        if guided:
+            self._guided = True
+            print("Guided mode: aim manually, press F8 to fire the shot.")
 
         if source == "chrome":
             self._region = self._capture.find_game_window()
@@ -131,7 +149,7 @@ class ShotAssistant:
         log.info("Region=%s  (%dx%d)", self._region, w, h)
         log.info("Canvas origin=(%d,%d)  offset=%s", sx, sy, self._canvas_offset)
 
-        if autoplay and self._predictor and self._predictor.ready:
+        if (autoplay or guided) and self._predictor and self._predictor.ready:
             self._auto_player = AutoPlayer(
                 hwnd=self._capture._hwnd, frame_w=w, frame_h=h)
 
@@ -252,6 +270,13 @@ class ShotAssistant:
             # ── 7. Stabilise ghost ball ───────────────────────────────────────
             ghost_pos = self._ghost_buf.push(raw_colls)
 
+            # ── guided: poll F8 key ───────────────────────────────────────────
+            if self._guided and not self._fire_requested:
+                import keyboard
+                if keyboard.is_pressed("f8"):
+                    self._fire_requested = True
+                    log.info("Guided: F8 pressed — will fire")
+
             # ── 7b. Data collection ───────────────────────────────────────────
             if self._collector is not None:
                 self._collector.push(
@@ -261,7 +286,10 @@ class ShotAssistant:
                 )
 
             # ── 8. Select best shot ───────────────────────────────────────────
-            if self._auto_player is not None:
+            if self._guided and self._auto_player is not None:
+                shot = self._run_guided(balls, cue_pos, ghost_pos, pockets,
+                                        table_snap, R)
+            elif self._auto_player is not None:
                 # AUTO-PLAY: model predicts ghost, ADB fires the shot
                 shot = self._run_autoplay(balls, cue_pos, ghost_pos, pockets,
                                           table_snap, R)
@@ -318,9 +346,32 @@ class ShotAssistant:
         # ── WAITING: shot just fired, wait for animation ──────────────────────
         if self._autoplay_state == "WAITING":
             if now - self._last_shot_time > POST_SHOT_WAIT:
+                # ── check retrain finished → reload model ─────────────────────
+                if self._retrain_proc and self._retrain_proc.poll() == 0:
+                    log.info("Self-play: retrain done — reloading model")
+                    self._predictor = ShotPredictor()
+                    self._retrain_proc = None
+
+                # ── evaluate shot outcome ──────────────────────────────────────
+                if self._selfplay and self._pre_shot_record:
+                    n_now = len([b for b in balls if b["type"] != "cue"])
+                    scored = n_now < self._pre_shot_n_balls
+                    self._selfplay_total += 1
+                    if scored:
+                        self._selfplay_success += 1
+                        self._save_selfplay_shot()
+                        log.info("Self-play: SCORED  success=%d/%d",
+                                 self._selfplay_success, self._selfplay_total)
+                        if self._selfplay_success % self._RETRAIN_EVERY == 0:
+                            self._trigger_retrain()
+                    else:
+                        log.info("Self-play: missed  success=%d/%d",
+                                 self._selfplay_success, self._selfplay_total)
+                    self._pre_shot_record = None
+
                 self._autoplay_state = "IDLE"
                 log.info("AutoPlay: ready for next shot")
-            # show current aim while waiting
+
             if ghost_pos is not None:
                 return shot_from_ghost(cue_pos, ghost_pos,
                                        self._ghost_buf.aim_conf,
@@ -329,14 +380,36 @@ class ShotAssistant:
 
         # ── IDLE: fire when ghost is visible (= our turn to aim) ─────────────
         if self._autoplay_state == "IDLE" and ghost_pos is not None:
-            ai_ghost = self._predictor.predict(
-                balls, cue_pos, self._my_type, table_snap)
+            ai_ghost = self._pick_target(
+                balls, cue_pos, pockets, table_snap, R)
 
             if ai_ghost:
                 log.info("AutoPlay: firing toward (%.0f, %.0f)  current_ghost=(%.0f, %.0f)",
                          *ai_ghost, *ghost_pos)
                 self._autoplay_state = "WAITING"
                 self._last_shot_time = now
+
+                if self._selfplay:
+                    tw = table_snap.x2 - table_snap.x1
+                    th = table_snap.y2 - table_snap.y1
+                    self._pre_shot_record = {
+                        "ts":       now,
+                        "my_type":  self._my_type or "unknown",
+                        "cue_n":    [round((cue_pos[0]-table_snap.x1)/tw, 4),
+                                     round((cue_pos[1]-table_snap.y1)/th, 4)],
+                        "ghost_n":  [round((ai_ghost[0]-table_snap.x1)/tw, 4),
+                                     round((ai_ghost[1]-table_snap.y1)/th, 4)],
+                        "balls": [
+                            {"pos_n": [round((b["pos"][0]-table_snap.x1)/tw, 4),
+                                       round((b["pos"][1]-table_snap.y1)/th, 4)],
+                             "type":    b["type"],
+                             "subtype": b.get("subtype", "")}
+                            for b in balls if b["type"] != "cue"
+                        ],
+                    }
+                    self._pre_shot_n_balls = len(
+                        [b for b in balls if b["type"] != "cue"])
+
                 threading.Thread(
                     target=self._auto_player.execute_shot,
                     args=(cue_pos, ai_ghost, ghost_pos),
@@ -353,6 +426,152 @@ class ShotAssistant:
                                    balls, pockets, table_snap, R)
         return best_physics_shot(cue_pos, balls, self._my_type,
                                  pockets, table_snap, R)
+
+    def _request_fire(self) -> None:
+        """Called when user presses F8."""
+        self._fire_requested = True
+
+    def _run_guided(self, balls, cue_pos, ghost_pos, pockets,
+                    table_snap, R) -> "Optional[Shot]":
+        """
+        Phase 1 — Guided mode:
+          Aim manually with the game wheel.
+          Press F8 → AI fires at the current ghost position and records the shot.
+        """
+        now = time.time()
+        POST = 5.5
+
+        # ── WAITING: shot fired, wait for animation ───────────────────────────
+        if self._guided_state == "WAITING":
+            if now - self._last_shot_time > POST:
+                if self._pre_shot_record is not None:
+                    n_now = len([b for b in balls if b["type"] != "cue"])
+                    if n_now < self._pre_shot_n_balls:
+                        self._selfplay_success += 1
+                        self._save_selfplay_shot()
+                        log.info("Guided: SCORED  success=%d/%d",
+                                 self._selfplay_success, self._selfplay_total)
+                        if self._selfplay_success % self._RETRAIN_EVERY == 0:
+                            self._trigger_retrain()
+                    else:
+                        log.info("Guided: missed  success=%d/%d",
+                                 self._selfplay_success, self._selfplay_total)
+                    self._selfplay_total += 1
+                    self._pre_shot_record = None
+                self._guided_state  = "IDLE"
+                self._fire_requested = False
+            if ghost_pos:
+                return shot_from_ghost(cue_pos, ghost_pos,
+                                       self._ghost_buf.aim_conf,
+                                       balls, pockets, table_snap, R)
+            return None
+
+        # ── IDLE: waiting for F8 press ────────────────────────────────────────
+        if not self._fire_requested or ghost_pos is None:
+            if ghost_pos:
+                return shot_from_ghost(cue_pos, ghost_pos,
+                                       self._ghost_buf.aim_conf,
+                                       balls, pockets, table_snap, R)
+            return best_physics_shot(cue_pos, balls, self._my_type,
+                                     pockets, table_snap, R)
+
+        # ── F8 pressed → fire! ────────────────────────────────────────────────
+        self._fire_requested = False
+        target = ghost_pos
+        log.info("Guided: FIRING at (%.0f, %.0f)", *target)
+        self._guided_state   = "WAITING"
+        self._last_shot_time = now
+
+        tw = table_snap.x2 - table_snap.x1
+        th = table_snap.y2 - table_snap.y1
+        self._pre_shot_record = {
+            "ts":      now,
+            "my_type": self._my_type or "unknown",
+            "cue_n":   [round((cue_pos[0]-table_snap.x1)/tw, 4),
+                        round((cue_pos[1]-table_snap.y1)/th, 4)],
+            "ghost_n": [round((target[0]-table_snap.x1)/tw, 4),
+                        round((target[1]-table_snap.y1)/th, 4)],
+            "balls": [
+                {"pos_n": [round((b["pos"][0]-table_snap.x1)/tw, 4),
+                            round((b["pos"][1]-table_snap.y1)/th, 4)],
+                 "type":    b["type"],
+                 "subtype": b.get("subtype", "")}
+                for b in balls if b["type"] != "cue"
+            ],
+        }
+        self._pre_shot_n_balls = len([b for b in balls if b["type"] != "cue"])
+
+        threading.Thread(
+            target=self._auto_player.execute_shot,
+            args=(cue_pos, target, ghost_pos),
+            daemon=True,
+        ).start()
+        return shot_from_ghost(cue_pos, target, 1.0,
+                               balls, pockets, table_snap, R)
+
+    def _pick_target(self, balls, cue_pos, pockets, table_snap, R):
+        """
+        Choose where to aim:
+          - Self-play: physics best shot + random exploration noise
+          - Auto-play: ML model prediction (falls back to physics)
+        """
+        import math, random
+
+        # Physics gives us the geometrically best shot
+        physics = best_physics_shot(cue_pos, balls, self._my_type,
+                                    pockets, table_snap, R)
+        physics_ghost = physics.ghost_pos if physics else None
+
+        if self._selfplay and physics_ghost:
+            # Add random angle noise for exploration (±12°, biased toward ±0°)
+            noise_deg = random.gauss(0, 6)   # gaussian: mostly small, occasionally bigger
+            noise_deg = max(-15, min(15, noise_deg))  # clamp
+            if noise_deg != 0:
+                dx = physics_ghost[0] - cue_pos[0]
+                dy = physics_ghost[1] - cue_pos[1]
+                angle = math.atan2(dy, dx) + math.radians(noise_deg)
+                dist  = math.hypot(dx, dy)
+                physics_ghost = (
+                    cue_pos[0] + dist * math.cos(angle),
+                    cue_pos[1] + dist * math.sin(angle),
+                )
+            log.info("Self-play target: physics+noise(%.1f°)=(%.0f,%.0f)",
+                     noise_deg, *physics_ghost)
+            return physics_ghost
+
+        # Auto-play: try ML model first, fall back to physics
+        if self._predictor:
+            ml_ghost = self._predictor.predict(
+                balls, cue_pos, self._my_type, table_snap)
+            if ml_ghost:
+                return ml_ghost
+
+        return physics_ghost
+
+    def _save_selfplay_shot(self) -> None:
+        """Save the last successful self-play shot to the dataset."""
+        import json as _json
+        from datetime import datetime
+        rec = self._pre_shot_record
+        if rec is None:
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        path  = os.path.join("ai", "dataset", f"selfplay_{today}.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as f:
+            f.write(_json.dumps(rec) + "\n")
+
+    def _trigger_retrain(self) -> None:
+        """Launch ai/train.py in a background subprocess."""
+        if self._retrain_proc and self._retrain_proc.poll() is None:
+            log.info("Self-play: retrain already running — skipping")
+            return
+        import subprocess
+        log.info("Self-play: launching retrain (success=%d)...", self._selfplay_success)
+        self._retrain_proc = subprocess.Popen(
+            [sys.executable, os.path.join("ai", "train.py")],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
 
     def _log_fps(self, buf: list, t0: float, n_balls: int, has_shot: bool,
                  extra: str = "") -> None:
@@ -443,6 +662,14 @@ if __name__ == "__main__":
         "--autoplay", action="store_true",
         help="AI plays automatically using the trained model (requires shot_model.pt)",
     )
+    parser.add_argument(
+        "--selfplay", action="store_true",
+        help="AI plays and learns from successful shots — retrains every 20 scored balls",
+    )
+    parser.add_argument(
+        "--guided", action="store_true",
+        help="Phase 1: you aim manually, AI fires automatically and records successful shots",
+    )
     args = parser.parse_args()
 
     if args.calibrate:
@@ -452,4 +679,6 @@ if __name__ == "__main__":
     else:
         ShotAssistant().start(source=args.source,
                               collect=args.collect,
-                              autoplay=args.autoplay)
+                              autoplay=args.autoplay or args.selfplay,
+                              selfplay=args.selfplay,
+                              guided=args.guided)
