@@ -34,7 +34,8 @@ BOUNCE_STEPS = 5      # max wall bounces to trace for the cue-ball path
 
 # ── Table detection ───────────────────────────────────────────────────────────
 SKIP_TOP_FRAC        = 0.27   # Chrome: fraction of frame height to skip (UI panel at top)
-SKIP_TOP_FRAC_SCRCPY = 0.15   # scrcpy: smaller skip — no browser chrome overhead
+SKIP_TOP_FRAC_SCRCPY = 0.22   # scrcpy: skip titlebar + game UI header
+SCRCPY_EXPAND_PX     = 39     # px to expand table bounds outward after edge refinement
 
 # ── Ball classification ────────────────────────────────────────────────────────
 CUE_WHITENESS_THRESH   = 0.22   # whiteness_score() threshold to identify the cue ball

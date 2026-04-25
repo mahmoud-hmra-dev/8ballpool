@@ -27,7 +27,9 @@ except Exception:
         pass
 
 import argparse
+import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -43,7 +45,7 @@ log = logging.getLogger(__name__)
 import cv2
 import numpy as np
 
-from config import TABLE_RECALC, TARGET_FPS, CUE_WHITENESS_THRESH, SKIP_TOP_FRAC_SCRCPY
+from config import TABLE_RECALC, TARGET_FPS, CUE_WHITENESS_THRESH, SKIP_TOP_FRAC_SCRCPY, SCRCPY_EXPAND_PX
 from models import Shot, TableBounds
 from overlay.window import OverlayWindow
 from pipeline.capture import ScreenCapture
@@ -69,11 +71,12 @@ class ShotAssistant:
         self._overlay:   Optional[OverlayWindow] = None
 
         self._table:          Optional[TableBounds] = None
-        self._table_age:      int  = 0      # frames since last table re-detection
+        self._table_age:      int  = 0
+        self._table_locked:   bool = False   # True when calibration is loaded (no auto re-detect)
         self._table_lock      = threading.Lock()
-        self._region:         Optional[tuple] = None   # screen capture region
+        self._region:         Optional[tuple] = None
         self._canvas_offset:  tuple[float, float] = (0.0, 0.0)
-        self._my_type:        Optional[str] = None     # "solid" | "stripe" | None
+        self._my_type:        Optional[str] = None
 
     # ── startup ───────────────────────────────────────────────────────────────
 
@@ -89,9 +92,18 @@ class ShotAssistant:
         else:  # scrcpy
             self._region = self._capture.find_scrcpy_window()
             if self._region is None:
-                log.error("scrcpy window not found. Start scrcpy first: scrcpy --window-title scrcpy")
+                log.error("scrcpy window not found. Start scrcpy first.")
                 sys.exit(1)
-            self._table_det = TableDetector(skip_top_frac=SKIP_TOP_FRAC_SCRCPY)
+            self._table_det = TableDetector(skip_top_frac=SKIP_TOP_FRAC_SCRCPY,
+                                            expand_px=SCRCPY_EXPAND_PX)
+
+        # Load saved calibration (overrides auto-detection if present)
+        calib = _load_calibration(source)
+        if calib:
+            with self._table_lock:
+                self._table = calib
+            self._table_locked = True
+            log.info("Calibration loaded: %s  r=%d", calib.as_tuple(), calib.ball_radius)
 
         x1, y1, x2, y2 = self._region
         w, h = x2 - x1, y2 - y1
@@ -146,10 +158,9 @@ class ShotAssistant:
                 raw_frame_saved = True
 
             # ── 2. Table detection (offloaded to background thread) ───────────
-            # Re-detect in the background every TABLE_RECALC frames so the
-            # fast loop is never stalled by table detection (~20 ms).
+            # Skipped when calibration is loaded — manual bounds never change.
             self._table_age += 1
-            if self._table is None or self._table_age >= TABLE_RECALC:
+            if not self._table_locked and (self._table is None or self._table_age >= TABLE_RECALC):
                 self._table_age = 0
                 _frame_copy = frame.copy()
                 threading.Thread(
@@ -312,6 +323,24 @@ def _resolve_source(source: str) -> str:
         print("Please enter 1 or 2.")
 
 
+# ── calibration loader ────────────────────────────────────────────────────────
+
+def _load_calibration(source: str) -> "Optional[TableBounds]":
+    path = os.path.join("calibration", f"table_{source}.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            b = json.load(f)
+        tw = b["x2"] - b["x1"]; th = b["y2"] - b["y1"]
+        ball_r = max(7, min(30, max(int(tw / 96), int(th / 48))))
+        return TableBounds(x1=b["x1"], y1=b["y1"], x2=b["x2"], y2=b["y2"],
+                           ball_radius=ball_r)
+    except Exception as e:
+        log.warning("Could not load calibration: %s", e)
+        return None
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -320,5 +349,15 @@ if __name__ == "__main__":
         "--source", choices=["chrome", "scrcpy"], default="auto",
         help="Capture source: 'chrome' for browser, 'scrcpy' for mobile mirror",
     )
+    parser.add_argument(
+        "--calibrate", action="store_true",
+        help="Open calibration tool to manually draw the table rectangle",
+    )
     args = parser.parse_args()
-    ShotAssistant().start(source=args.source)
+
+    if args.calibrate:
+        from calibrate import run_calibration
+        source = _resolve_source(args.source)
+        run_calibration(source)
+    else:
+        ShotAssistant().start(source=args.source)

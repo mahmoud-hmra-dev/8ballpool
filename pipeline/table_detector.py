@@ -24,8 +24,12 @@ from models import TableBounds
 
 class TableDetector:
 
-    def __init__(self, skip_top_frac: float = SKIP_TOP_FRAC):
+    def __init__(self, skip_top_frac: float = SKIP_TOP_FRAC,
+                 refine_edges: bool = True,
+                 expand_px: int = 0):
         self._skip_top_frac = skip_top_frac
+        self._refine_edges  = refine_edges
+        self._expand_px     = expand_px
 
     def detect(self, frame: np.ndarray) -> TableBounds | None:
         """
@@ -56,23 +60,34 @@ class TableDetector:
         ox1 = max(0, ox1); oy1 = max(0, oy1)
         ox2 = min(fw, ox2); oy2 = min(fh, oy2)
 
-        # Refine bounds at full scale
-        r = self._refine(frame[oy1:oy2, ox1:ox2])
-        if r:
-            fx, fy, fw2, fh2 = r
-            x1, y1 = ox1 + fx, oy1 + fy
-            x2, y2 = x1 + fw2, y1 + fh2
-        else:
-            tw, th = ox2 - ox1, oy2 - oy1
-            x1 = ox1 + max(8, int(tw * .07)); y1 = oy1 + max(8, int(th * .10))
-            x2 = ox2 - max(8, int(tw * .07)); y2 = oy2 - max(8, int(th * .10))
+        if self._refine_edges:
+            # Refine bounds at full scale (trims to inner playing surface)
+            r = self._refine(frame[oy1:oy2, ox1:ox2])
+            if r:
+                fx, fy, fw2, fh2 = r
+                x1, y1 = ox1 + fx, oy1 + fy
+                x2, y2 = x1 + fw2, y1 + fh2
+            else:
+                tw, th = ox2 - ox1, oy2 - oy1
+                x1 = ox1 + max(8, int(tw * .07)); y1 = oy1 + max(8, int(th * .10))
+                x2 = ox2 - max(8, int(tw * .07)); y2 = oy2 - max(8, int(th * .10))
 
-        # Fine-tune with gradient-based inner edge detection
-        inner = self._inner_edges(frame[y1:y2, x1:x2])
-        if inner is not None:
-            ix1, iy1, ix2, iy2 = inner
-            x1 += ix1; y1 += iy1
-            x2  = x1 + (ix2 - ix1); y2 = y1 + (iy2 - iy1)
+            # Fine-tune with gradient-based inner edge detection
+            inner = self._inner_edges(frame[y1:y2, x1:x2])
+            if inner is not None:
+                ix1, iy1, ix2, iy2 = inner
+                x1 += ix1; y1 += iy1
+                x2  = x1 + (ix2 - ix1); y2 = y1 + (iy2 - iy1)
+        else:
+            # Use coarse outer bounds directly — keeps rail & pocket positions
+            x1, y1, x2, y2 = ox1, oy1, ox2, oy2
+
+        # Expand outward to recover rail / pocket positions trimmed by edge refinement
+        if self._expand_px:
+            x1 = max(0,  x1 - self._expand_px)
+            y1 = max(0,  y1 - self._expand_px)
+            x2 = min(fw, x2 + self._expand_px)
+            y2 = min(fh, y2 + self._expand_px)
 
         x1 = max(0, x1); y1 = max(0, y1)
         x2 = min(fw, x2); y2 = min(fh, y2)
