@@ -31,7 +31,7 @@ SEED        = 42
 # ── 1. Load data ──────────────────────────────────────────────────────────────
 
 def load_records() -> list[dict]:
-    files = glob.glob(os.path.join(DATASET_DIR, "shots_*.jsonl"))
+    files = glob.glob(os.path.join(DATASET_DIR, "selfplay_*.jsonl"))
     records = []
     for path in sorted(files):
         with open(path, encoding="utf-8") as f:
