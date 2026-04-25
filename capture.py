@@ -34,18 +34,45 @@ class ScreenCapture:
 
     def find_game_window(self) -> tuple | None:
         found = []
+        minimized = []
 
         def _cb(hwnd, _):
             if not win32gui.IsWindowVisible(hwnd):
                 return
             title = win32gui.GetWindowText(hwnd)
             if "8 Ball Pool" in title:
-                found.append((10, hwnd, win32gui.GetWindowRect(hwnd)))
+                prio = 10
             elif "Chrome" in title or "chrome" in title:
-                found.append((1,  hwnd, win32gui.GetWindowRect(hwnd)))
+                prio = 1
+            else:
+                return
+            if win32gui.IsIconic(hwnd):
+                minimized.append((prio, hwnd, title))
+                return
+            found.append((prio, hwnd, win32gui.GetWindowRect(hwnd)))
 
         win32gui.EnumWindows(_cb, None)
         if not found:
+            if minimized:
+                minimized.sort(reverse=True)
+                _, hwnd, title = minimized[0]
+                print(f"[Capture] Found Chrome but it is minimized: '{title}'")
+                print("          Restoring window...")
+                try:
+                    SW_RESTORE = 9
+                    win32gui.ShowWindow(hwnd, SW_RESTORE)
+                    win32gui.SetForegroundWindow(hwnd)
+                    rect = win32gui.GetWindowRect(hwnd)
+                    if not win32gui.IsIconic(hwnd) and rect[2] > rect[0] and rect[3] > rect[1]:
+                        self._hwnd     = hwnd
+                        self._win_rect = rect
+                        x1, y1, x2, y2 = rect
+                        y1 += 90
+                        self._region = (x1, y1, x2, y2)
+                        print(f"[Capture] Window: '{title}'  rect={rect}")
+                        return self._region
+                except Exception as e:
+                    print(f"[Capture] Could not restore window: {e}")
             return None
 
         found.sort(reverse=True)

@@ -53,6 +53,13 @@ class EightBallAssistant:
         x1, y1, x2, y2 = self.region
         w, h = x2 - x1, y2 - y1
 
+        if w <= 0 or h <= 0:
+            print(f"\n[ERROR] Chrome window has invalid size {w}×{h}.\n"
+                  f"  rect={self.region}\n"
+                  f"  This usually means the Chrome window is minimized.\n"
+                  f"  Restore the window and try again.\n")
+            sys.exit(1)
+
         sx = max(0, x1)
         sy = max(0, y1)
         self._dx = sx - x1   # frame → canvas x offset (usually 11 or 7)
