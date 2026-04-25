@@ -26,6 +26,7 @@ except Exception:
     except Exception:
         pass
 
+import argparse
 import logging
 import sys
 import threading
@@ -42,7 +43,7 @@ log = logging.getLogger(__name__)
 import cv2
 import numpy as np
 
-from config import TABLE_RECALC, TARGET_FPS, CUE_WHITENESS_THRESH
+from config import TABLE_RECALC, TARGET_FPS, CUE_WHITENESS_THRESH, SKIP_TOP_FRAC_SCRCPY
 from models import Shot, TableBounds
 from overlay.window import OverlayWindow
 from pipeline.capture import ScreenCapture
@@ -61,7 +62,7 @@ class ShotAssistant:
 
     def __init__(self):
         self._capture    = ScreenCapture()
-        self._table_det  = TableDetector()
+        self._table_det  = None   # created in start() once source is known
         self._yolo       = AsyncYOLOInference()   # GPU runs in its own thread
         self._tracker    = BallTracker()
         self._ghost_buf  = GhostBuffer()
@@ -76,11 +77,21 @@ class ShotAssistant:
 
     # ── startup ───────────────────────────────────────────────────────────────
 
-    def start(self) -> None:
-        self._region = self._capture.find_game_window()
-        if self._region is None:
-            log.error("Chrome window not found. Open Chrome at 8ballpool.com/game")
-            sys.exit(1)
+    def start(self, source: str = "auto") -> None:
+        source = _resolve_source(source)
+
+        if source == "chrome":
+            self._region = self._capture.find_game_window()
+            if self._region is None:
+                log.error("Chrome window not found. Open Chrome at 8ballpool.com/game")
+                sys.exit(1)
+            self._table_det = TableDetector()
+        else:  # scrcpy
+            self._region = self._capture.find_scrcpy_window()
+            if self._region is None:
+                log.error("scrcpy window not found. Start scrcpy first: scrcpy --window-title scrcpy")
+                sys.exit(1)
+            self._table_det = TableDetector(skip_top_frac=SKIP_TOP_FRAC_SCRCPY)
 
         x1, y1, x2, y2 = self._region
         w, h = x2 - x1, y2 - y1
@@ -117,6 +128,7 @@ class ShotAssistant:
         interval    = 1.0 / TARGET_FPS
         fps_buf:    list[float] = []
         debug_saved = False
+        raw_frame_saved = False   # save one raw frame immediately for diagnosis
 
         while True:
             t0 = time.perf_counter()
@@ -126,6 +138,12 @@ class ShotAssistant:
             if frame is None:
                 time.sleep(0.005)
                 continue
+
+            # Save a raw frame once so we can verify capture is working
+            if not raw_frame_saved:
+                cv2.imwrite("debug_raw.png", frame)
+                log.info("debug_raw.png saved — shape=%s", frame.shape)
+                raw_frame_saved = True
 
             # ── 2. Table detection (offloaded to background thread) ───────────
             # Re-detect in the background every TABLE_RECALC frames so the
@@ -157,6 +175,10 @@ class ShotAssistant:
             raw_balls, raw_colls = self._yolo.latest_result()
 
             if not raw_balls:
+                # Save annotated frame (table only) so we can diagnose YOLO misses
+                if not debug_saved:
+                    self._save_debug(frame, [], table_snap.pockets(), table_snap)
+                    debug_saved = True
                 self._overlay.push_shot(None)
                 self._log_fps(fps_buf, t0, n_balls=0, has_shot=False)
                 time.sleep(max(0.0, interval - (time.perf_counter() - t0)))
@@ -272,7 +294,31 @@ class ShotAssistant:
         log.info("debug_frame.png saved — balls=%d  r=%d", len(balls), table.ball_radius)
 
 
+# ── source selection ──────────────────────────────────────────────────────────
+
+def _resolve_source(source: str) -> str:
+    """Return 'chrome' or 'scrcpy'. Prompts the user if source=='auto'."""
+    if source in ("chrome", "scrcpy"):
+        return source
+    print("\nSelect capture source:")
+    print("  1) Chrome  (اللعبة في المتصفح)")
+    print("  2) scrcpy  (الموبايل عبر USB/WiFi)")
+    while True:
+        choice = input("Enter 1 or 2: ").strip()
+        if choice == "1":
+            return "chrome"
+        if choice == "2":
+            return "scrcpy"
+        print("Please enter 1 or 2.")
+
+
 # ── entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    ShotAssistant().start()
+    parser = argparse.ArgumentParser(description="8 Ball Pool AI Shot Assistant")
+    parser.add_argument(
+        "--source", choices=["chrome", "scrcpy"], default="auto",
+        help="Capture source: 'chrome' for browser, 'scrcpy' for mobile mirror",
+    )
+    args = parser.parse_args()
+    ShotAssistant().start(source=args.source)

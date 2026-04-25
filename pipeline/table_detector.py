@@ -24,6 +24,9 @@ from models import TableBounds
 
 class TableDetector:
 
+    def __init__(self, skip_top_frac: float = SKIP_TOP_FRAC):
+        self._skip_top_frac = skip_top_frac
+
     def detect(self, frame: np.ndarray) -> TableBounds | None:
         """
         Detect the table in a full captured frame.
@@ -31,7 +34,7 @@ class TableDetector:
         or None if the table cannot be found.
         """
         fh, fw = frame.shape[:2]
-        skip   = int(fh * SKIP_TOP_FRAC)   # skip score panel at top
+        skip   = int(fh * self._skip_top_frac)   # skip score panel at top
         search = frame[skip:, :]
 
         # Work at 50% scale for the coarse search — fast and sufficient

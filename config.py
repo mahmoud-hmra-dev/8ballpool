@@ -33,7 +33,8 @@ RAY_LEN      = 1800   # px — how far to extend the target-ball ray when scorin
 BOUNCE_STEPS = 5      # max wall bounces to trace for the cue-ball path
 
 # ── Table detection ───────────────────────────────────────────────────────────
-SKIP_TOP_FRAC = 0.27  # fraction of frame height to skip (score/UI panel at top)
+SKIP_TOP_FRAC        = 0.27   # Chrome: fraction of frame height to skip (UI panel at top)
+SKIP_TOP_FRAC_SCRCPY = 0.15   # scrcpy: smaller skip — no browser chrome overhead
 
 # ── Ball classification ────────────────────────────────────────────────────────
 CUE_WHITENESS_THRESH   = 0.22   # whiteness_score() threshold to identify the cue ball

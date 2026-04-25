@@ -76,7 +76,58 @@ class ScreenCapture:
         found.sort(reverse=True)
         _, hwnd, rect = found[0]
         log.info("Window: '%s'  rect=%s", win32gui.GetWindowText(hwnd), rect)
-        return self._init_region(hwnd, rect)
+        return self._init_region(hwnd, rect, top_offset=BROWSER_TOP_OFFSET)
+
+    def find_scrcpy_window(self) -> tuple | None:
+        """
+        Find the scrcpy phone-mirror display window (SDL_app class).
+        scrcpy uses SDL2 — its display window class is always 'SDL_app'.
+        The title is usually the device model name (e.g. 'SM_S938B').
+        No browser offset — the game fills the entire scrcpy window.
+        Returns (x1, y1, x2, y2) of the capture region, or None.
+        """
+        import win32api
+        import win32con
+
+        found     = []
+        minimized = []
+
+        def _cb(hwnd, _):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            # scrcpy display window class is SDL_app; skip console/terminal windows
+            cls = win32gui.GetClassName(hwnd)
+            if cls != "SDL_app":
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if win32gui.IsIconic(hwnd):
+                minimized.append((1, hwnd, title))
+            else:
+                found.append((1, hwnd, win32gui.GetWindowRect(hwnd)))
+
+        win32gui.EnumWindows(_cb, None)
+
+        if not found:
+            if not minimized:
+                log.warning("No SDL_app window found — is scrcpy running?")
+                return None
+            minimized.sort(reverse=True)
+            _, hwnd, title = minimized[0]
+            log.info("Found minimized scrcpy SDL window: '%s' — restoring...", title)
+            try:
+                win32gui.ShowWindow(hwnd, 9)
+                win32gui.SetForegroundWindow(hwnd)
+                rect = win32gui.GetWindowRect(hwnd)
+                if not win32gui.IsIconic(hwnd) and rect[2] > rect[0] and rect[3] > rect[1]:
+                    return self._init_region(hwnd, rect, top_offset=0)
+            except Exception as e:
+                log.warning("Could not restore scrcpy window: %s", e)
+            return None
+
+        found.sort(reverse=True)
+        _, hwnd, rect = found[0]
+        log.info("scrcpy SDL window: '%s'  rect=%s", win32gui.GetWindowText(hwnd), rect)
+        return self._init_region(hwnd, rect, top_offset=0)
 
     def _try_restore(self, minimized: list) -> tuple | None:
         if not minimized:
@@ -89,17 +140,16 @@ class ScreenCapture:
             win32gui.SetForegroundWindow(hwnd)
             rect = win32gui.GetWindowRect(hwnd)
             if not win32gui.IsIconic(hwnd) and rect[2] > rect[0] and rect[3] > rect[1]:
-                return self._init_region(hwnd, rect)
+                return self._init_region(hwnd, rect, top_offset=BROWSER_TOP_OFFSET)
         except Exception as e:
             log.warning("Could not restore window: %s", e)
         return None
 
-    def _init_region(self, hwnd: int, rect: tuple) -> tuple:
+    def _init_region(self, hwnd: int, rect: tuple, top_offset: int = BROWSER_TOP_OFFSET) -> tuple:
         self._hwnd     = hwnd
         self._win_rect = rect
         x1, y1, x2, y2 = rect
-        # Skip browser chrome (title bar + tabs + address bar)
-        self._region = (x1, y1 + BROWSER_TOP_OFFSET, x2, y2)
+        self._region = (x1, y1 + top_offset, x2, y2)
         return self._region
 
     # ── GDI cache ─────────────────────────────────────────────────────────────
