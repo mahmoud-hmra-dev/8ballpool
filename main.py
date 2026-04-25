@@ -93,6 +93,10 @@ class ShotAssistant:
         self._overlay.on_type_change = self._set_my_type
         self._overlay.setup()
 
+        # Start capture thread before the pipeline — the pipeline reads
+        # latest_frame() so it never blocks on PrintWindow.
+        self._capture.start_async(self._region)
+
         pipeline = threading.Thread(target=self._run_pipeline, daemon=True)
         pipeline.start()
 
@@ -111,10 +115,10 @@ class ShotAssistant:
         while True:
             t0 = time.perf_counter()
 
-            # ── 1. Capture ────────────────────────────────────────────────────
-            frame = self._capture.capture(self._region)
+            # ── 1. Capture (reads latest frame from async capture thread) ────
+            frame = self._capture.latest_frame()
             if frame is None:
-                time.sleep(0.05)
+                time.sleep(0.005)
                 continue
 
             # ── 2. Table detection (offloaded to background thread) ───────────

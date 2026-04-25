@@ -170,3 +170,34 @@ class ScreenCapture:
             print(f"[Capture] mss error: {e}")
             self._local.sct = None
             return None
+
+    # ── async capture ─────────────────────────────────────────────────────────
+
+    def start_async(self, region: tuple) -> None:
+        """
+        Spawn a background thread that calls capture() in a tight loop.
+        The pipeline reads latest_frame() instead of calling capture() directly,
+        so it is never stalled waiting for PrintWindow to finish.
+
+        PrintWindow on a 2560×1440 window takes ~35 ms — making it async
+        breaks this bottleneck and lets the pipeline run at 60+ FPS.
+        """
+        self._async_frame: np.ndarray | None = None
+        self._async_lock  = threading.Lock()
+        self._region      = region
+        t = threading.Thread(
+            target=self._capture_loop, daemon=True, name="capture-worker")
+        t.start()
+        print("[Capture] async capture thread started")
+
+    def latest_frame(self) -> np.ndarray | None:
+        """Return the most recently captured frame (may be None on first call)."""
+        with self._async_lock:
+            return self._async_frame
+
+    def _capture_loop(self) -> None:
+        while True:
+            frame = self.capture(self._region)
+            if frame is not None:
+                with self._async_lock:
+                    self._async_frame = frame
