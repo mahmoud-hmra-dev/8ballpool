@@ -45,6 +45,9 @@ log = logging.getLogger(__name__)
 import cv2
 import numpy as np
 
+from ai.data_collector import DataCollector
+from ai.predictor import ShotPredictor
+from ai.auto_player import AutoPlayer
 from config import TABLE_RECALC, TARGET_FPS, CUE_WHITENESS_THRESH, SKIP_TOP_FRAC_SCRCPY, SCRCPY_EXPAND_PX
 from models import Shot, TableBounds
 from overlay.window import OverlayWindow
@@ -72,16 +75,26 @@ class ShotAssistant:
 
         self._table:          Optional[TableBounds] = None
         self._table_age:      int  = 0
-        self._table_locked:   bool = False   # True when calibration is loaded (no auto re-detect)
+        self._table_locked:   bool = False
         self._table_lock      = threading.Lock()
         self._region:         Optional[tuple] = None
         self._canvas_offset:  tuple[float, float] = (0.0, 0.0)
         self._my_type:        Optional[str] = None
+        self._collector:      Optional[DataCollector] = None
+        self._predictor:      Optional[ShotPredictor] = None
+        self._auto_player:    Optional[AutoPlayer]    = None
+        self._autoplay_state: str = "IDLE"   # IDLE | WAITING
+        self._last_shot_time: float = 0.0
 
     # ── startup ───────────────────────────────────────────────────────────────
 
-    def start(self, source: str = "auto") -> None:
+    def start(self, source: str = "auto", collect: bool = False,
+              autoplay: bool = False) -> None:
         source = _resolve_source(source)
+        if collect:
+            self._collector = DataCollector()
+        if autoplay:
+            self._predictor = ShotPredictor()
 
         if source == "chrome":
             self._region = self._capture.find_game_window()
@@ -117,6 +130,10 @@ class ShotAssistant:
 
         log.info("Region=%s  (%dx%d)", self._region, w, h)
         log.info("Canvas origin=(%d,%d)  offset=%s", sx, sy, self._canvas_offset)
+
+        if autoplay and self._predictor and self._predictor.ready:
+            self._auto_player = AutoPlayer(
+                hwnd=self._capture._hwnd, frame_w=w, frame_h=h)
 
         self._overlay = OverlayWindow(sx, sy, w, h)
         self._overlay.on_type_change = self._set_my_type
@@ -235,19 +252,31 @@ class ShotAssistant:
             # ── 7. Stabilise ghost ball ───────────────────────────────────────
             ghost_pos = self._ghost_buf.push(raw_colls)
 
-            # ── 8. Select best shot ───────────────────────────────────────────
-            # PATH A: player is aiming — use YOLO ghost ball
-            shot: Optional[Shot] = (
-                shot_from_ghost(
-                    cue_pos, ghost_pos, self._ghost_buf.aim_conf,
-                    balls, pockets, table_snap, R,
+            # ── 7b. Data collection ───────────────────────────────────────────
+            if self._collector is not None:
+                self._collector.push(
+                    balls, cue_pos, ghost_pos,
+                    self._ghost_buf.aim_conf,
+                    self._my_type, table_snap,
                 )
-                if ghost_pos else None
-            )
-            # PATH B: player is not aiming — suggest best physics shot
-            if shot is None:
-                shot = best_physics_shot(
-                    cue_pos, balls, self._my_type, pockets, table_snap, R)
+
+            # ── 8. Select best shot ───────────────────────────────────────────
+            if self._auto_player is not None:
+                # AUTO-PLAY: model predicts ghost, ADB fires the shot
+                shot = self._run_autoplay(balls, cue_pos, ghost_pos, pockets,
+                                          table_snap, R)
+            else:
+                # MANUAL: follow player aim or suggest physics shot
+                shot = (
+                    shot_from_ghost(
+                        cue_pos, ghost_pos, self._ghost_buf.aim_conf,
+                        balls, pockets, table_snap, R,
+                    )
+                    if ghost_pos else None
+                )
+                if shot is None:
+                    shot = best_physics_shot(
+                        cue_pos, balls, self._my_type, pockets, table_snap, R)
 
             # ── 9. Translate frame coords → overlay canvas coords ─────────────
             if shot:
@@ -260,7 +289,8 @@ class ShotAssistant:
                 debug_saved = True
 
             self._overlay.push_shot(shot)
-            self._log_fps(fps_buf, t0, len(balls), has_shot=shot is not None)
+            _extra = f"state:{self._autoplay_state}  cue:{'ok' if cue_pos else 'NO'}  ghost:{'yes' if ghost_pos else 'no'}" if self._auto_player else ""
+            self._log_fps(fps_buf, t0, len(balls), has_shot=shot is not None, extra=_extra)
             time.sleep(max(0.0, interval - (time.perf_counter() - t0)))
 
     # ── helpers ───────────────────────────────────────────────────────────────
@@ -273,12 +303,64 @@ class ShotAssistant:
                 self._table = detected
             log.info("Table=%s  r=%d", detected.as_tuple(), detected.ball_radius)
 
-    def _log_fps(self, buf: list, t0: float, n_balls: int, has_shot: bool) -> None:
+    def _run_autoplay(self, balls, cue_pos, ghost_pos, pockets,
+                      table_snap, R) -> "Optional[Shot]":
+        """
+        Auto-play state machine:
+          IDLE    → ghost visible (our turn) → predict & fire → WAITING
+          WAITING → wait POST_SHOT_WAIT seconds → IDLE
+        """
+        import threading
+
+        now = time.time()
+        POST_SHOT_WAIT = 5.5  # seconds to wait after firing
+
+        # ── WAITING: shot just fired, wait for animation ──────────────────────
+        if self._autoplay_state == "WAITING":
+            if now - self._last_shot_time > POST_SHOT_WAIT:
+                self._autoplay_state = "IDLE"
+                log.info("AutoPlay: ready for next shot")
+            # show current aim while waiting
+            if ghost_pos is not None:
+                return shot_from_ghost(cue_pos, ghost_pos,
+                                       self._ghost_buf.aim_conf,
+                                       balls, pockets, table_snap, R)
+            return None
+
+        # ── IDLE: fire when ghost is visible (= our turn to aim) ─────────────
+        if self._autoplay_state == "IDLE" and ghost_pos is not None:
+            ai_ghost = self._predictor.predict(
+                balls, cue_pos, self._my_type, table_snap)
+
+            if ai_ghost:
+                log.info("AutoPlay: firing toward (%.0f, %.0f)  current_ghost=(%.0f, %.0f)",
+                         *ai_ghost, *ghost_pos)
+                self._autoplay_state = "WAITING"
+                self._last_shot_time = now
+                threading.Thread(
+                    target=self._auto_player.execute_shot,
+                    args=(cue_pos, ai_ghost, ghost_pos),
+                    daemon=True,
+                ).start()
+                return shot_from_ghost(
+                    cue_pos, ai_ghost, 1.0,
+                    balls, pockets, table_snap, R)
+
+        # Fallback: show current aim or physics suggestion
+        if ghost_pos is not None:
+            return shot_from_ghost(cue_pos, ghost_pos,
+                                   self._ghost_buf.aim_conf,
+                                   balls, pockets, table_snap, R)
+        return best_physics_shot(cue_pos, balls, self._my_type,
+                                 pockets, table_snap, R)
+
+    def _log_fps(self, buf: list, t0: float, n_balls: int, has_shot: bool,
+                 extra: str = "") -> None:
         buf.append(time.perf_counter() - t0)
         if len(buf) > TARGET_FPS:
             buf.pop(0)
             fps = len(buf) / sum(buf)
-            print(f"FPS:{fps:5.1f}  balls:{n_balls:2d}  shot:{'yes' if has_shot else 'no '}",
+            print(f"FPS:{fps:5.1f}  balls:{n_balls:2d}  shot:{'yes' if has_shot else 'no '}  {extra}",
                   end="\r")
 
     def _save_debug(self, frame: np.ndarray, balls: list,
@@ -353,6 +435,14 @@ if __name__ == "__main__":
         "--calibrate", action="store_true",
         help="Open calibration tool to manually draw the table rectangle",
     )
+    parser.add_argument(
+        "--collect", action="store_true",
+        help="Record your shots to ai/dataset/ for AI training",
+    )
+    parser.add_argument(
+        "--autoplay", action="store_true",
+        help="AI plays automatically using the trained model (requires shot_model.pt)",
+    )
     args = parser.parse_args()
 
     if args.calibrate:
@@ -360,4 +450,6 @@ if __name__ == "__main__":
         source = _resolve_source(args.source)
         run_calibration(source)
     else:
-        ShotAssistant().start(source=args.source)
+        ShotAssistant().start(source=args.source,
+                              collect=args.collect,
+                              autoplay=args.autoplay)
