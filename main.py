@@ -53,6 +53,7 @@ from models import Shot, TableBounds
 from overlay.window import OverlayWindow
 from pipeline.capture import ScreenCapture
 from pipeline.classifier import classify_ball, whiteness_score
+from pipeline.game_state import GameStateTracker
 from pipeline.inference import AsyncYOLOInference
 from pipeline.shot_engine import best_physics_shot, shot_from_ghost
 from pipeline.table_detector import TableDetector
@@ -82,6 +83,7 @@ class ShotAssistant:
         self._my_type:        Optional[str] = None
         self._collector:      Optional[DataCollector] = None
         self._predictor:      Optional[ShotPredictor] = None
+        self._game_state:     GameStateTracker = GameStateTracker()
         self._auto_player:    Optional[AutoPlayer]    = None
         self._autoplay_state: str = "IDLE"   # IDLE | WAITING
         self._last_shot_time: float = 0.0
@@ -241,7 +243,11 @@ class ShotAssistant:
                 if i == cue_idx and has_cue:
                     b["type"] = "cue"; b["subtype"] = "cue"
                 else:
-                    b["type"], b["subtype"] = classify_ball(b["patch"], b["r"])
+                    t, sub = classify_ball(b["patch"], b["r"])
+                    # Ghost ball (aim indicator) can look white — don't call it cue
+                    if t == "cue":
+                        t, sub = "ball", "ball"
+                    b["type"] = t; b["subtype"] = sub
 
             # ── 5. Update ball-radius estimate (slow EWA — very stable) ───────
             measured = max(7, min(30, int(np.median([b["r"] for b in raw_balls]))))
@@ -277,7 +283,10 @@ class ShotAssistant:
                     self._fire_requested = True
                     log.info("Guided: F8 pressed — will fire")
 
-            # ── 7b. Data collection ───────────────────────────────────────────
+            # ── 7b. Game state tracking ──────────────────────────────────────
+            self._game_state.update(balls, self._my_type or "unknown")
+
+            # ── 7d. Data collection ───────────────────────────────────────────
             if self._collector is not None:
                 self._collector.push(
                     balls, cue_pos, ghost_pos,

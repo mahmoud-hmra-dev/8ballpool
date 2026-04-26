@@ -46,6 +46,20 @@ class ScrcpyTouch:
         except Exception:
             pass
 
+    def _save_state(self) -> tuple:
+        """Save cursor position and current foreground window."""
+        return win32api.GetCursorPos(), win32gui.GetForegroundWindow()
+
+    def _restore_state(self, saved: tuple) -> None:
+        """Restore cursor position and foreground window after injection."""
+        cursor, prev_hwnd = saved
+        win32api.SetCursorPos(cursor)
+        try:
+            if prev_hwnd and prev_hwnd != self._hwnd:
+                win32gui.SetForegroundWindow(prev_hwnd)
+        except Exception:
+            pass
+
     # ── low-level events ──────────────────────────────────────────────────────
 
     def down(self, fx: int, fy: int) -> None:
@@ -68,20 +82,28 @@ class ScrcpyTouch:
     # ── gestures ──────────────────────────────────────────────────────────────
 
     def tap(self, fx: int, fy: int, hold_ms: int = 80) -> None:
-        self.down(fx, fy)
-        time.sleep(hold_ms / 1000)
-        self.up(fx, fy)
+        saved = self._save_state()
+        try:
+            self.down(fx, fy)
+            time.sleep(hold_ms / 1000)
+            self.up(fx, fy)
+        finally:
+            self._restore_state(saved)
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int,
               duration_ms: int = 400, steps: int = 30) -> None:
-        self.down(x1, y1)
-        delay = duration_ms / 1000 / max(steps, 1)
-        for i in range(1, steps + 1):
-            t = i / steps
-            self.move(int(x1 + (x2 - x1) * t),
-                      int(y1 + (y2 - y1) * t))
-            time.sleep(delay)
-        self.up(x2, y2)
+        saved = self._save_state()
+        try:
+            self.down(x1, y1)
+            delay = duration_ms / 1000 / max(steps, 1)
+            for i in range(1, steps + 1):
+                t = i / steps
+                self.move(int(x1 + (x2 - x1) * t),
+                          int(y1 + (y2 - y1) * t))
+                time.sleep(delay)
+            self.up(x2, y2)
+        finally:
+            self._restore_state(saved)
 
     def drag_start(self, fx: int, fy: int) -> None:
         self.down(fx, fy)

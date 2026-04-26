@@ -20,7 +20,8 @@ import cv2
 import numpy as np
 
 from config import (
-    CUE_WHITENESS_THRESH, CUE_WHITE_FRAC, EIGHT_BALL_DARK_FRAC,
+    CUE_WHITENESS_THRESH, CUE_WHITE_FRAC,
+    EIGHT_BALL_DARK_FRAC, EIGHT_BALL_V_THRESH,
     STRIPE_MID_Y0, STRIPE_MID_Y1, STRIPE_MID_WHITE_MIN, STRIPE_TOTAL_WHITE_MAX,
 )
 
@@ -64,27 +65,39 @@ def whiteness_score(patch: np.ndarray, radius: int) -> float:
 
 def is_stripe(patch: np.ndarray) -> bool:
     """
-    Does this ball have a white band across its middle third?
-    Stripe balls have a prominent white equatorial stripe; solid balls don't.
-
-    Strategy: compare white-pixel fraction in the middle rows vs. the whole
-    patch. A stripe has concentrated white in the middle, not spread overall.
+    Stripe balls have a white equatorial band; solid balls don't.
+    Strategy: white concentration in the centre band >> top/bottom bands.
     """
     if patch is None or patch.size == 0:
         return False
     hsv    = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
     hh, ww = hsv.shape[:2]
-    y0, y1 = int(hh * STRIPE_MID_Y0), int(hh * STRIPE_MID_Y1)
-    mid    = hsv[y0:y1, :]
-    if mid.size == 0:
+    if hh < 8:
         return False
 
-    mv, ms = mid[:, :, 2].flatten(), mid[:, :, 1].flatten()
-    v,  s  = hsv[:, :, 2].flatten(),  hsv[:, :, 1].flatten()
+    # Three horizontal bands
+    y_top = int(hh * 0.25)
+    y_bot = int(hh * 0.75)
+    top  = hsv[:y_top, :]
+    mid  = hsv[y_top:y_bot, :]
+    bot  = hsv[y_bot:, :]
 
-    mid_white   = np.sum((mv > 165) & (ms < 75)) / max(len(mv), 1)
-    total_white = np.sum((v  > 165) & (s  < 75)) / max(len(v),  1)
-    return mid_white > STRIPE_MID_WHITE_MIN and total_white < STRIPE_TOTAL_WHITE_MAX
+    def white_frac(region):
+        if region.size == 0:
+            return 0.0
+        v = region[:, :, 2].flatten()
+        s = region[:, :, 1].flatten()
+        return float(np.sum((v > 150) & (s < 100))) / max(len(v), 1)
+
+    wf_mid = white_frac(mid)
+    wf_top = white_frac(top)
+    wf_bot = white_frac(bot)
+    wf_all = white_frac(hsv)
+
+    # Stripe: plenty of white in the centre, AND centre has clearly more
+    # white than the top/bottom, AND not so much total white it's the cue
+    mid_dominant = wf_mid > max(wf_top, wf_bot) * 1.4 + 0.05
+    return wf_mid > STRIPE_MID_WHITE_MIN and mid_dominant and wf_all < STRIPE_TOTAL_WHITE_MAX
 
 
 def classify_color(patch: np.ndarray) -> str:
@@ -103,7 +116,9 @@ def classify_color(patch: np.ndarray) -> str:
     # Special cases first (before color matching)
     if np.sum((v > 170) & (s < 70)) / n > CUE_WHITE_FRAC:
         return "cue"
-    if np.sum((v < 65) & (s < 80)) / n > EIGHT_BALL_DARK_FRAC:
+    # 8-ball: mostly dark with no strong color (black body + white "8" circle)
+    dark_and_gray = np.sum((v < EIGHT_BALL_V_THRESH) & (s < 90)) / n
+    if dark_and_gray > EIGHT_BALL_DARK_FRAC and float(np.mean(s)) < 70:
         return "8ball"
 
     # Need meaningful saturation to identify a color

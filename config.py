@@ -40,11 +40,12 @@ SCRCPY_EXPAND_PX     = 39     # px to expand table bounds outward after edge ref
 # ── Ball classification ────────────────────────────────────────────────────────
 CUE_WHITENESS_THRESH   = 0.22   # whiteness_score() threshold to identify the cue ball
 CUE_WHITE_FRAC         = 0.35   # fraction of high-V/low-S pixels → classify as cue
-EIGHT_BALL_DARK_FRAC   = 0.55   # fraction of dark pixels → classify as 8-ball
-STRIPE_MID_Y0          = 0.33   # stripe middle-band top boundary (fraction of patch height)
-STRIPE_MID_Y1          = 0.67   # stripe middle-band bottom boundary
-STRIPE_MID_WHITE_MIN   = 0.22   # white fraction in middle band must exceed this → stripe
-STRIPE_TOTAL_WHITE_MAX = 0.42   # overall white fraction must stay below this → stripe (not cue)
+EIGHT_BALL_DARK_FRAC   = 0.38   # fraction of dark pixels → classify as 8-ball (lowered: game renders with shading)
+EIGHT_BALL_V_THRESH    = 85     # V threshold for "dark" pixel on 8-ball
+STRIPE_MID_Y0          = 0.25   # stripe middle-band top boundary (fraction of patch height)
+STRIPE_MID_Y1          = 0.75   # stripe middle-band bottom boundary
+STRIPE_MID_WHITE_MIN   = 0.12   # white fraction in middle band must exceed this → stripe
+STRIPE_TOTAL_WHITE_MAX = 0.55   # overall white fraction must stay below this → stripe (not cue)
 
 # ── Shot difficulty thresholds (used by renderer) ─────────────────────────────
 DIFF_EASY_MISS_PX    = 12   # miss ≤ this AND angle ≤ DIFF_EASY_ANGLE_DEG  → EASY
