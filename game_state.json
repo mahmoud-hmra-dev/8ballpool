@@ -1,53 +1,42 @@
 {
-  "timestamp": 1777321282.53,
+  "timestamp": 1777477351.87,
   "my_type": "unknown",
   "my_balls_remaining": "?",
   "opponent_balls_remaining": "?",
   "balls_on_table": {
-    "solid": 1,
-    "stripe": 0,
+    "solid": 7,
+    "stripe": 2,
     "8ball": 0,
     "cue": 1
   },
   "8ball_on_table": false,
   "cue_on_table": true,
-  "fouls": [
-    {
-      "type": "foul_8ball",
-      "message": "8-ball potted early \u2014 FOUL (loss)",
-      "time": 1777321264.91
-    },
-    {
-      "type": "foul_8ball",
-      "message": "8-ball potted early \u2014 FOUL (loss)",
-      "time": 1777321274.11
-    }
-  ],
+  "fouls": [],
   "recent_events": [
     {
-      "type": "potted_stripe",
-      "message": "1 stripe ball(s) potted [opponent]",
-      "time": 1777321270.33
-    },
-    {
-      "type": "potted_stripe",
-      "message": "1 stripe ball(s) potted [opponent]",
-      "time": 1777321270.39
+      "type": "potted_solid",
+      "message": "1 solid ball(s) potted [opponent]",
+      "time": 1777477345.15
     },
     {
       "type": "potted_solid",
       "message": "1 solid ball(s) potted [opponent]",
-      "time": 1777321273.86
+      "time": 1777477345.76
     },
     {
-      "type": "foul_8ball",
-      "message": "8-ball potted early \u2014 FOUL (loss)",
-      "time": 1777321274.11
+      "type": "potted_stripe",
+      "message": "1 stripe ball(s) potted [opponent]",
+      "time": 1777477345.85
+    },
+    {
+      "type": "potted_stripe",
+      "message": "1 stripe ball(s) potted [opponent]",
+      "time": 1777477346.25
     },
     {
       "type": "potted_solid",
       "message": "1 solid ball(s) potted [opponent]",
-      "time": 1777321277.79
+      "time": 1777477346.31
     }
   ]
 }
